@@ -1,2 +1,3 @@
-# Refbase
-Библиотека дизайн-референсов (Refbase)
+# Библиотека референсов
+
+Опубликовано из Refbase. Сайт: https://mrferonian-prog.github.io/Refbase/
