@@ -188,6 +188,9 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;back
 .chk{display:flex;align-items:center;gap:9px;margin-top:14px;cursor:pointer}
 .chk input{accent-color:var(--accent);width:16px;height:16px;margin:0}
 .box{border:1px solid var(--line-2);border-radius:10px;padding:12px 14px;margin-top:14px;background:var(--bg)}
+.sp-text{font-size:13px;line-height:1.55;color:var(--ink-2);background:var(--bg);border-radius:10px;padding:11px 13px;white-space:pre-wrap;word-break:break-word}
+.desc-in{font-size:14px;line-height:1.55;min-height:104px}
+.sp-in{font-size:13px;line-height:1.55;min-height:120px}
 .srcnote{font-size:12px;color:var(--muted);margin-top:8px;line-height:1.5}
 .result{font-size:13px;margin-top:10px;line-height:1.5}
 .result.ok{color:var(--ok)}
@@ -440,7 +443,7 @@ const DEFAULT_TYPES = ['Сайты и лендинги', 'Мобильные п�
   .map((name, i) => ({ id: 't' + i, name }));
 const DEFAULT_SETTINGS = {
   provider: 'claude', claudeKey: '', claudeModel: 'claude-sonnet-5-5', openaiKey: '', openaiModel: 'gpt-5.5',
-  ollamaHost: 'http://localhost:11434', ollamaModel: 'qwen3-vl:8b', autoAnalyze: true, lang: 'ru', webFetch: true,
+  ollamaHost: 'http://localhost:11434', ollamaModel: 'qwen3-vl:8b', autoAnalyze: true, lang: 'ru', promptLang: 'en', webFetch: true,
   customName: '', customFormat: 'openai', customBase: '', customKey: '', customModel: '', customProxy: '',
   gh: { token: '', repo: 'refs', branch: 'main', owner: '', lastAt: 0, url: '', partial: false },
 };
@@ -454,11 +457,22 @@ const typeById = id => S.types.find(t => t.id === id);
 const boardById = id => S.boards.find(b => b.id === id);
 const typeName = id => typeById(id)?.name || 'Без типа';
 
+/* Палитра карточки: цвета с ролями и долями. Для старых референсов собирается из замера пикселей и старой дизайн-системы. */
+const COLOR_ROLES = ['background', 'surface', 'text', 'accent', 'secondary', 'muted'];
+function deriveColors(r) {
+  const ds = (r.ds && Array.isArray(r.ds.colors) ? r.ds.colors : []).filter(c => c && /^#[0-9a-f]{6}$/i.test(String(c.hex || '')));
+  const roleOf = hex => { const c = ds.find(x => x.hex.toUpperCase() === hex.toUpperCase()); const role = String(c?.role || '').toLowerCase(); return COLOR_ROLES.includes(role) ? role : role === 'primary' ? 'secondary' : role === 'border' || role === 'decorative' ? 'muted' : ''; };
+  if (Array.isArray(r.palette) && r.palette.length) return r.palette.slice(0, 7).map(p => ({ hex: p.hex, role: roleOf(p.hex), p: p.p }));
+  const seen = new Set();
+  return ds.filter(c => { const k = c.hex.toUpperCase(); if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, 7).map(c => ({ hex: c.hex.toUpperCase(), role: roleOf(c.hex) }));
+}
 function normalizeRef(r) {
   r.tags = r.tags || {}; for (const k of ['style', 'direction', 'keywords']) r.tags[k] = Array.isArray(r.tags[k]) ? r.tags[k] : [];
   r.fonts = Array.isArray(r.fonts) ? r.fonts : []; r.boards = Array.isArray(r.boards) ? r.boards : [];
   r.palette = Array.isArray(r.palette) ? r.palette : []; r.ai = r.ai || { status: 'none' };
   if (!r.cover) r.cover = isPageLink(r) ? 'link' : 'upload';
+  r.stylePrompt = r.stylePrompt || '';
+  if (!Array.isArray(r.colors)) r.colors = deriveColors(r);
   r.title = r.title || 'Без названия'; r.url = r.url || ''; r.description = r.description || ''; r.notes = r.notes || '';
   return r;
 }
@@ -612,7 +626,7 @@ function loadFont(name) {
 const fontFallback = c => /serif/i.test(c) && !/sans/i.test(c) ? 'Georgia, serif' : /mono/i.test(c) ? 'ui-monospace, monospace' : /script|hand/i.test(c) ? 'cursive' : 'system-ui, sans-serif';
 
 /* ---------- выборка и фильтры ---------- */
-const FACETS = [['style', 'Стиль'], ['direction', 'Графика'], ['font', 'Шрифты'], ['keywords', 'Теги']];
+const FACETS = [['style', 'Теги стиля'], ['font', 'Шрифты']];
 function refValues(r, k) {
   if (k === 'font') return (r.fonts || []).map(f => f.name);
   return r.tags?.[k] || [];
@@ -622,8 +636,8 @@ function matchFilter(r, f) {
   const v = low(f.v); return refValues(r, f.k).some(x => low(x) === v);
 }
 function haystack(r) {
-  return low([r.title, r.description, r.url, typeName(r.type), ...r.tags.style, ...r.tags.direction, ...r.tags.keywords,
-    ...r.fonts.map(f => f.name), ...(r.ds?.colors || []).map(c => c.hex + ' ' + (c.name || ''))].join(' '));
+  return low([r.title, r.description, r.stylePrompt, r.url, typeName(r.type), ...r.tags.style,
+    ...r.fonts.map(f => f.name + ' ' + (f.look || '')), ...(r.colors || []).map(c => c.hex)].join(' '));
 }
 function scopeRefs() {
   let list = S.refs;
@@ -722,7 +736,9 @@ function cardHTML(r) {
   const badge = r.shot === 'pending' ? '<span class="ai"><i class="spin"></i>Скриншот</span>'
     : st === 'running' ? '<span class="ai"><i class="spin"></i>Анализ</span>'
     : st === 'pending' ? `<span class="ai"><i class="spin"></i>${r.ai.waitUntil > Date.now() ? 'Ждёт лимита' : 'В очереди'}</span>`
-    : st === 'error' && !PUB ? `<span class="ai err" title="${esc(r.ai.error)}">Ошибка анализа</span>` : '';
+    : st === 'error' && !PUB ? `<span class="ai err" title="${esc(r.ai.error)}">Ошибка анализа</span>`
+    : r.sp?.status === 'running' ? '<span class="ai"><i class="spin"></i>Промпт стиля</span>'
+    : r.sp?.status === 'pending' ? `<span class="ai"><i class="spin"></i>${r.sp.waitUntil > Date.now() ? 'Ждёт лимита' : 'Промпт в очереди'}</span>` : '';
   const sub = [r.tags.style.slice(0, 2).join(', '), hostOf(r.url)].filter(Boolean).join(' — ') || typeName(r.type);
   return `<article class="card" data-id="${r.id}"${PUB ? '' : ' draggable="true"'}>
   <div class="thumb" data-act="open" style="aspect-ratio:${ar}"><img data-img="${r.id}" alt="${esc(r.title)}" draggable="false">${badge}${PUB ? '' : `<button class="bbtn ${nb ? 'has' : ''}" data-act="boards" title="Разложить по доскам">${I.folder}${nb ? `<span>${nb}</span>` : ''}</button>`}</div>
@@ -951,6 +967,41 @@ function tagBlock(r, k, label, ro) {
   return `<div class="blk"><div class="blk-h">${label}</div><div class="chips">${vals.map(v => `<span class="chip" data-act="d-tag" data-k="${k}" data-v="${esc(v)}" title="Показать все с этим тегом">${esc(v)}${ro ? '' : `<i class="x" data-act="d-tagdel" data-k="${k}" data-v="${esc(v)}" title="Убрать">✕</i>`}</span>`).join('')}${ro ? '' : `<input class="tag-add" data-k="${k}" placeholder="+ добавить">`}</div></div>`;
 }
 const PROV_NAME = { claude: 'Claude', openai: 'OpenAI', ollama: 'Ollama', custom: 'Своя модель' };
+function stylePromptBlock(r, ro) {
+  const sp = r.sp || {}; const busy = sp.status === 'pending' || sp.status === 'running';
+  if (ro) return r.stylePrompt ? `<div class="blk"><div class="blk-h">Промпт стиля <span class="sub">для генерации новых элементов в этом стиле</span><span class="act"><button class="lnk" data-act="d-sp-copy" data-id="${r.id}">Скопировать</button></span></div><div class="sp-text">${esc(r.stylePrompt)}</div></div>` : '';
+  const analyzed = r.ai?.status === 'done';
+  let h = `<div class="blk"><div class="blk-h">Промпт стиля <span class="sub">${r.stylePrompt ? 'замените [subject] на то, что нужно сгенерировать' : 'для генерации новых элементов в этом стиле'}</span></div>`;
+  if (busy) h += `<div class="aibar" style="margin-top:0"><i class="spin"></i>${sp.status === 'running' ? 'Нейросеть пишет промпт стиля…' : sp.waitUntil > Date.now() ? `Провайдер перегружен, повтор в ${new Date(sp.waitUntil).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}` : 'Ждёт очереди'}</div>`;
+  else if (sp.status === 'error') h += `<div class="aibar err" style="margin-top:0"><span>${esc(sp.error || 'Ошибка')}</span>${sp.raw ? '<button class="btn sm" data-act="d-sp-raw">Ответ модели</button>' : ''}<button class="btn sm" data-act="d-sp-gen">${I.spark}Повторить</button></div>`;
+  if (r.stylePrompt) h += `<textarea class="inp sp-in" id="d-sp" rows="6" spellcheck="false">${esc(r.stylePrompt)}</textarea><div class="row" style="margin-top:8px"><button class="btn sm primary" data-act="d-sp-copy">Скопировать промпт</button>${busy ? '' : `<button class="btn sm" data-act="d-sp-gen">${I.spark}Переписать</button>`}</div>`;
+  else if (!busy && sp.status !== 'error') h += analyzed ? `<div class="row" style="margin-top:0"><button class="btn sm" data-act="d-sp-gen">${I.spark}Создать промпт стиля</button></div>` : `<div class="srcnote" style="margin-top:0">Появится после анализа референса.</div>`;
+  return h + '</div>';
+}
+const ROLE_NAME = { background: 'фон', surface: 'поверхность', text: 'текст', accent: 'акцент', secondary: 'второй цвет', muted: 'приглушённый' };
+function descBlock(r, ro) {
+  if (ro) return r.description ? `<div class="blk"><div class="blk-h">Описание</div><p class="desc" style="margin:0">${esc(r.description)}</p></div>` : '';
+  return `<div class="blk"><div class="blk-h">Описание</div><textarea class="inp desc-in" id="d-desc" rows="4" placeholder="Появится после анализа: что это за материал и что определяет его стиль">${esc(r.description)}</textarea></div>`;
+}
+function colorsBlock(r) {
+  const cs = (r.colors || []).filter(c => isHex(c.hex)); if (!cs.length) return '';
+  const withP = cs.filter(c => +c.p > 0);
+  const strip = withP.length >= 2 ? `<div class="strip">${withP.map(c => `<button style="background:${esc(c.hex)};flex:${+c.p}" data-act="copy" data-v="${esc(c.hex)}" title="${esc(c.hex)} — ${+c.p}%"></button>`).join('')}</div>` : '';
+  return `<div class="blk"><div class="blk-h">Палитра <span class="sub">нажмите на цвет, чтобы скопировать</span></div>${strip}<div class="sw"${strip ? ' style="margin-top:10px"' : ''}>${cs.map(c => `<button class="swc" data-act="copy" data-v="${esc(c.hex)}" title="Скопировать ${esc(c.hex)}"><i style="background:${esc(c.hex)}"></i><div><b>${esc(c.hex)}</b>${esc([ROLE_NAME[c.role] || c.role, +c.p > 0 ? c.p + '%' : ''].filter(Boolean).join(', '))}</div></button>`).join('')}</div></div>`;
+}
+function fontsBlock(r, ro) {
+  if (ro && !r.fonts.length) return '';
+  let h = `<div class="blk"><div class="blk-h">Шрифты${r.fonts.length ? '' : ' <span class="sub">не определены</span>'}</div>`;
+  h += r.fonts.map((f, i) => {
+    loadFont(f.name);
+    return `<div class="font"><div class="sample" style="font-family:'${esc(cssFont(f.name))}', ${fontFallback(f.category)}" data-act="d-tag" data-k="font" data-v="${esc(f.name)}" title="Показать все с этим шрифтом">${esc(f.name)}</div>
+      <div class="meta">${esc([f.look, f.role].filter(Boolean).join(' — ') || f.category || '')}</div>
+      ${f.alternatives?.length ? `<div class="alts">Похожие: ${f.alternatives.map(a => `<span class="chip">${esc(a)}</span>`).join('')}</div>` : ''}
+      <div class="font-acts"><a href="https://fonts.google.com/?query=${encodeURIComponent(f.name)}" target="_blank" rel="noopener">Google Fonts</a><a href="https://www.myfonts.com/search?query=${encodeURIComponent(f.name)}" target="_blank" rel="noopener">MyFonts</a>${ro ? '' : `<button data-act="d-fontdel" data-i="${i}">Убрать</button>`}</div></div>`;
+  }).join('');
+  if (!ro) h += `<input class="tag-add" data-k="font" placeholder="+ шрифт" style="width:120px">`;
+  return h + '</div>';
+}
 function infoHTML(r) {
   const ro = PUB; const st = r.ai?.status;
   let h = ro ? `<h2 class="ttl">${esc(r.title)}</h2>` : `<input class="ttl-in" id="d-title" value="${esc(r.title)}" maxlength="120" aria-label="Название">`;
@@ -969,26 +1020,8 @@ function infoHTML(r) {
     else if (st === 'done') h += `<div class="aibar"><span>Разметка ${r.ai.source === 'link' ? 'по ссылке' + (r.ai.fetched ? ', страница прочитана' : '') : 'по скриншоту'}: ${esc(providerLabel(r.ai.provider, r))} ${esc(r.ai.model || '')}</span><button class="btn sm" data-act="d-analyze">${I.spark}Заново</button></div>`;
     else h += `<div class="aibar"><span>Теги ещё не проставлены</span><button class="btn sm" data-act="d-analyze">${I.spark}Проанализировать</button></div>`;
   }
-  if (r.description) h += `<p class="desc">${esc(r.description)}</p>`;
-  h += tagBlock(r, 'style', 'Стиль', ro) + tagBlock(r, 'direction', 'Графическое направление', ro) + tagBlock(r, 'keywords', 'Теги', ro);
-  if (r.fonts.length || !ro) {
-    h += `<div class="blk"><div class="blk-h">Шрифты${r.fonts.length ? '' : ' <span class="sub">не определены</span>'}</div>`;
-    h += r.fonts.map((f, i) => {
-      loadFont(f.name);
-      return `<div class="font"><div class="sample" style="font-family:'${esc(cssFont(f.name))}', ${fontFallback(f.category)}" data-act="d-tag" data-k="font" data-v="${esc(f.name)}" title="Показать все с этим шрифтом">${esc(f.name)}</div>
-      <div class="meta">${esc([f.category, f.role].filter(Boolean).join(', '))}</div>
-      ${f.confidence ? `<div class="conf" title="Уверенность нейросети ${Math.round(f.confidence * 100)}%"><i style="width:${Math.round(f.confidence * 100)}%"></i></div>` : ''}
-      ${f.alternatives?.length ? `<div class="alts">Похожие: ${f.alternatives.map(a => `<span class="chip">${esc(a)}</span>`).join('')}</div>` : ''}
-      <div class="font-acts"><a href="https://fonts.google.com/?query=${encodeURIComponent(f.name)}" target="_blank" rel="noopener">Google Fonts</a><a href="https://www.myfonts.com/search?query=${encodeURIComponent(f.name)}" target="_blank" rel="noopener">MyFonts</a>${ro ? '' : `<button data-act="d-fontdel" data-i="${i}">Убрать</button>`}</div></div>`;
-    }).join('');
-    if (!ro) h += `<input class="tag-add" data-k="font" placeholder="+ шрифт" style="width:120px">`;
-    h += '</div>';
-  }
-  if (r.palette?.length) h += `<div class="blk"><div class="blk-h">Палитра <span class="sub">замер по пикселям, нажмите для копирования</span></div><div class="strip">${r.palette.map(p => `<button style="background:${p.hex};flex:${p.p}" data-act="copy" data-v="${p.hex}" title="${p.hex} — ${p.p}%"></button>`).join('')}</div></div>`;
-  const ds = dsHTML(r.ds, ro);
-  if (ds) h += `<div class="blk"><div class="blk-h">Дизайн-система <span class="sub">из найденных элементов</span><span class="act"><button class="lnk" data-act="d-css">CSS</button><button class="lnk" data-act="d-json">JSON</button></span></div>${ds}</div>`;
+  h += descBlock(r, ro) + colorsBlock(r) + fontsBlock(r, ro) + tagBlock(r, 'style', 'Теги стиля', ro) + stylePromptBlock(r, ro);
   if (!ro) {
-    h += `<div class="notes"><div class="blk-h">Заметки <span class="sub">не публикуются</span></div><textarea class="inp" id="d-notes" rows="3" placeholder="Что здесь понравилось, где применить">${esc(r.notes)}</textarea></div>`;
     h += `<div class="dfoot"><button class="btn sm" data-act="d-replace">${isPageLink(r) ? 'Добавить свой скриншот' : 'Заменить изображение'}</button>${r.hasImg ? '<button class="btn sm" data-act="d-download">Скачать оригинал</button>' : ''}<button class="btn sm danger" data-act="d-delete">Удалить</button></div>`;
   }
   return h;
@@ -1021,7 +1054,8 @@ const saveDetailText = debounce(r => { saveRef(r); updateCard(r); }, 500);
 function onDetailInput(e) {
   const r = refById(S.openId); if (!r || PUB) return;
   if (e.target.id === 'd-title') { r.title = e.target.value.trim() || 'Без названия'; r.titleAuto = false; saveDetailText(r); }
-  if (e.target.id === 'd-notes') { r.notes = e.target.value; saveDetailText(r); }
+  if (e.target.id === 'd-desc') { r.description = e.target.value.trim(); saveDetailText(r); }
+  if (e.target.id === 'd-sp') { r.stylePrompt = e.target.value; saveDetailText(r); }
 }
 async function onDetailChange(e) {
   const r = refById(S.openId); if (!r || PUB) return;
@@ -1032,7 +1066,7 @@ async function onDetailKey(e) {
   if (!e.target.classList.contains('tag-add') || (e.key !== 'Enter' && e.key !== ',')) return;
   e.preventDefault(); const r = refById(S.openId); const v = e.target.value.trim().replace(/,$/, ''); if (!r || !v) return;
   const k = e.target.dataset.k;
-  if (k === 'font') { if (!r.fonts.some(f => low(f.name) === low(v))) r.fonts.push({ name: v, category: '', role: '', confidence: 0, alternatives: [] }); }
+  if (k === 'font') { if (!r.fonts.some(f => low(f.name) === low(v))) r.fonts.push({ name: v, category: '', look: '', role: '', confidence: 0, alternatives: [] }); }
   else if (!r.tags[k].some(t => low(t) === low(v))) r.tags[k].push(v);
   await saveRef(r); renderDetail(); updateCard(r); renderSide();
 }
@@ -1194,12 +1228,16 @@ function maybeAnalyze(r, force) {
   if (!providerReady()) return;
   enqueue(r.id);
 }
-function enqueue(id) {
+/* mode: 'full' — полный анализ, 'prompt' — только промпт стиля для уже разобранного референса. */
+const jobMode = new Map();
+const jobKey = mode => mode === 'prompt' ? 'sp' : 'ai';
+function enqueue(id, mode = 'full') {
   const r = refById(id); if (!r) return;
   if (!providerReady()) { toast('Подключите нейросеть в настройках, чтобы проставлять теги', 'err'); openSettings('ai'); return; }
   if (r.shot === 'pending') { toast('Скриншот страницы ещё готовится — анализ начнётся сам'); return; }
-  if (S.queue.includes(id) || r.ai?.status === 'running') return;
-  r.ai = { ...(r.ai || {}), status: 'pending', error: '' }; S.queue.push(id);
+  if (S.queue.includes(id) || r.ai?.status === 'running' || r.sp?.status === 'running') { if (mode === 'full') jobMode.set(id, 'full'); return; }
+  jobMode.set(id, mode); const k = jobKey(mode);
+  r[k] = { ...(r[k] || {}), status: 'pending', error: '' }; S.queue.push(id);
   updateCard(r); if (S.openId === id) renderDetail(); pump();
 }
 /* Провайдер перегружен (429 / лимит): ставим всю очередь на паузу до сброса лимита. */
@@ -1227,60 +1265,54 @@ function vocab(k, n = 50) {
   return [...m.values()].sort((a, b) => b[1] - a[1]).slice(0, n).map(x => x[0]);
 }
 const useWebFetch = r => S.settings.provider === 'claude' && S.settings.webFetch !== false && isPageLink(r);
+/* Правила для промпта стиля: готовый текст для генеративной модели, который переносит стиль референса на новые элементы. */
+function styleRules() {
+  const lang = S.settings.promptLang === 'ru' ? 'Russian' : 'English';
+  return `stylePrompt rules — a ready-to-paste prompt for an image-generation model (Midjourney, Flux, Stable Diffusion, GPT Image, Nano Banana, Recraft) that reproduces THIS visual style for NEW graphic elements, not a copy of this exact image:
+- Write it in ${lang}. One paragraph, 70-150 words, dense comma-separated descriptive phrases, no lists, no line breaks, no quotes.
+- Begin with "[subject], " — a placeholder the user replaces with what to generate — then the format (e.g. "presentation slide, 16:9", "dark landing page hero", "portrait poster", "flat vector illustration").
+- Then cover, in this order and only if present: palette with exact hex codes, their roles and rough share; imagery and its treatment (photo / 3D / illustration, lighting, toning, grain, haze); gradients and light effects; texture and materials; shape language (corners, lines, geometry, outlines); typography character (weight, width, contrast, case, tracking, size contrast — you may name the typeface); signature motifs; composition, grid and density; mood.
+- Be concrete; no vague words like "beautiful", "modern", "high quality". Never mention brand names, logos, product names, people, or text copied from the reference.
+- End with "Avoid: ..." listing 3-6 things that would break this style.`;
+}
 function buildPrompt(r, manifest) {
   const lang = S.settings.lang === 'en' ? 'English' : 'Russian';
-  const style = vocab('style'), dir = vocab('direction');
+  const style = vocab('style');
   const imgs = manifest.map(m => '  - ' + m).join('\n');
   const source = isPageLink(r)
-    ? `ANALYSIS PRIORITY — MANDATORY RULE:
-This reference has a source link: ${r.url}
-The live resource behind this link is the PRIMARY subject of the whole analysis. Describe the resource itself (the site, product page, app or case study), not just one picture.
-${useWebFetch(r) ? '- First, fetch this URL with the web_fetch tool and read the page. Prefer facts from the page over visual guessing: real typeface names (font-family names, Google Fonts / Adobe Fonts links if present), colors, copy, structure, components, what the product is.\n' : '- If you have a tool that opens web pages (web fetch, browser, HTTP request), open this URL first and read the page — rendered page, HTML and CSS. Prefer facts from the page over visual guessing: real font-family names and font files, colors from CSS, copy, structure, components, what the product is. If you cannot open it, analyze the images below.\n'}- Read-only task: do not create or change files, do not send messages, do not take any action beyond reading pages and answering.
-- The attached images are renders of that link and secondary material:
-${imgs}
-- If a user screenshot disagrees with the live page, trust the live page.`
-    : `ANALYSIS SOURCE — MANDATORY RULE:
-This reference has no source link. The attached screenshot is the only source: base the entire analysis on it.
+    ? `SOURCE — MANDATORY RULE: this reference has a link: ${r.url}
+The live page is the PRIMARY source.${useWebFetch(r) ? ' Fetch it with the web_fetch tool first.' : ' If you have a tool that opens web pages (browser, web fetch), open it first.'} Describe how the page LOOKS when rendered: colors, imagery, typography, shapes, composition.
+Ignore everything that is not visible in a still image: animations, hover effects, cursor, scrolling, CSS functions and variable names, class names, menu item names, company facts and history.
+Attached images are renders of this link (secondary material):
+${imgs}`
+    : `SOURCE — MANDATORY RULE: there is no link. The attached image is the only source:
 ${imgs}`;
-  return `You are a senior design analyst cataloguing design references for a designer's library.
+  return `You are a senior art director cataloguing design references. The data you write will be used to generate NEW graphics in the same visual style.
 ${source}
-Return ONLY one JSON object as your final answer. No markdown, no comments.
 
-Context:
-- Material types to choose from: ${JSON.stringify(S.types.map(t => t.name))}. Put the best fit into "type" exactly as written. Only if none fits at all, propose a new short type name.
-- Existing tag vocabulary — reuse these exact spellings when they apply, add new tags only when needed. style: ${JSON.stringify(style)}; direction: ${JSON.stringify(dir)}
-${r.palette?.length ? `- Dominant colors measured from the pixels of the cover image: ${JSON.stringify(r.palette.map(p => p.hex + ' ' + p.p + '%'))}. Prefer these exact hex values in designSystem.colors when they correspond.\n` : ''}- Write all human-readable values (title, description, tags, notes, descriptions) in ${lang}. Keep established movement names, technique names and typeface names in their usual original form (e.g. "Swiss Style", "Bauhaus", "Inter").
+Work in this order:
+1. Check that you can actually see the attached image(s). If you cannot (the model has no vision, or the image failed to load), set "sawImages": false and never guess the visual style from file names or color numbers.
+2. Identify the material precisely. Several slides on one canvas = a presentation deck; pages of a brand book = branding; a phone frame does not make it an app if the content is a website; a web page with products = website. Captions, watermarks and @handles added on top by whoever posted the image are not part of the design — ignore them.
+3. Study what carries the style: format, imagery and its treatment, color and its proportions, light and gradients, texture, shapes and lines, typography character, signature motifs, composition and density.
+Describe only what is visible. Never invent.
 
-JSON shape:
+Return ONLY one JSON object, no markdown, no comments:
 {
- "title": "short descriptive name, 2-6 words",
- "type": "one of the material types",
- "description": "1-2 sentences: what it is and what makes it notable as a reference",
- "style": ["3-6 visual style tags, e.g. minimalism, brutalism, Swiss Style, retro-futurism, glassmorphism, editorial"],
- "direction": ["2-5 graphic direction tags — the main graphic means: photography, 3D, vector illustration, type-driven, collage, gradients, pixel art, abstract geometry, hand-drawn"],
- "keywords": ["3-8 other useful tags: industry, mood, notable techniques, layout patterns"],
- "fonts": [{"name": "best guess of the exact typeface", "category": "sans-serif|serif|monospace|display|script|slab|handwritten", "role": "where it is used", "confidence": 0.0, "alternatives": ["up to 3 similar typefaces, prefer Google Fonts"]}],
- "designSystem": {}
+ "sawImages": true,
+ "title": "2-6 words: format + the most distinctive visual trait",
+ "type": "one of: ${S.types.map(t => t.name).join(' | ')}",
+ "description": "exactly 2 short sentences in ${lang}: 1) what the material is (format) and its overall look; 2) what specifically defines its style. No marketing, no company facts, no interactivity.",
+ "style": ["5-8 style tags in ${lang}: aesthetic, technique/medium, imagery treatment, color character, typography character, mood. No industry, product, company or content words. Reuse these spellings when they fit: ${JSON.stringify(style)}"],
+ "colors": [{"hex": "#RRGGBB", "role": "background|surface|text|accent|secondary|muted", "share": 0}],
+ "fonts": [{"name": "typeface name, or the closest well-known one", "category": "sans-serif|serif|monospace|display|script", "look": "visual character in ${lang}: weight, width, contrast, case, tracking", "role": "where it is used, in ${lang}", "confidence": 0.0, "alternatives": ["up to 3 similar typefaces, prefer Google Fonts"]}],
+ "stylePrompt": "see the rules below"
 }
+Rules:
+- colors: 3-7 key colors, most important first; "share" = rough % of visible area. ${r.palette?.length ? `Measured from the cover pixels: ${JSON.stringify(r.palette.map(p => p.hex + ' ' + p.p + '%'))} — use these exact hex values where they match and keep their shares; add a small but important accent the measurement missed.` : 'Take hex values from the page styles or the image.'}
+- fonts: at most 3, only clearly visible text styles. If unsure, give the closest well-known typeface with confidence below 0.5 and describe the look precisely — the look matters more than the name.
+- The type of material, title and tags must match what is actually shown.
 
-designSystem rules — build it ONLY from elements that actually exist in the source:
-- Include a key only when that kind of element is clearly present. Omit absent keys entirely: no empty arrays, no nulls, no placeholders, no guesses. A poster without UI has no components, no spacing and no grid unless clearly expressed. No buttons present → no button components.
-- Possible keys:
-  "colors": [{"hex": "#RRGGBB", "name": "", "role": "primary|secondary|accent|background|surface|text|muted|border|success|warning|error|decorative"}] (3-10)
-  "gradients": [{"css": "valid CSS gradient", "name": ""}]
-  "typography": [{"role": "display|h1|h2|h3|body|caption|label|button|nav|numeric|logo", "font": "", "weight": 400, "size": "48px", "lineHeight": "", "letterSpacing": "", "case": "none|uppercase|lowercase|capitalize"}]
-  "spacing": {"base": "8px", "scale": ["8px", "16px"], "notes": ""}
-  "radii": [{"name": "", "value": "8px", "usage": ""}]
-  "shadows": [{"name": "", "css": "valid box-shadow", "usage": ""}]
-  "borders": [{"css": "valid border shorthand", "usage": ""}]
-  "grid": {"columns": 12, "gutter": "", "margin": "", "maxWidth": "", "notes": ""}
-  "components": [{"name": "", "kind": "button|input|card|nav|badge|chip|tabs|toggle|checkbox|radio|slider|avatar|tooltip|modal|table|list|search|pagination|progress|other", "description": "", "styles": {"background": "", "color": "", "border": "", "borderRadius": "", "padding": "", "boxShadow": "", "fontFamily": "", "fontWeight": "", "fontSize": "", "textTransform": ""}}] (only distinct components that are present, max 8)
-  "iconography": {"style": "", "stroke": "", "notes": ""}
-  "imagery": {"style": "", "treatment": ""}
-  "illustration": {"style": "", "notes": ""}
-  "motifs": ["recurring graphic elements, patterns, shapes"]
-  "layout": {"composition": "", "density": "airy|balanced|dense", "notes": ""}
-- Font names: give the real typeface if you can identify it; otherwise the closest well-known typeface with lower confidence.`;
+${styleRules()}`;
 }
 async function aiFetch(url, opt, label) {
   let res;
@@ -1417,7 +1449,7 @@ function parseJSON(t) {
   if (b > 0) { let a = t.indexOf('{'), n = 0; while (a >= 0 && a < b && n++ < 40) { tries.push(t.slice(a, b + 1)); a = t.indexOf('{', a + 1); } }
   let fallback = null;
   for (const c of tries) {
-    try { const o = JSON.parse(c.trim()); if (o && typeof o === 'object' && !Array.isArray(o)) { if ('title' in o || 'style' in o || 'designSystem' in o) return o; fallback = fallback || o; } } catch { /* следующий вариант */ }
+    try { const o = JSON.parse(c.trim()); if (o && typeof o === 'object' && !Array.isArray(o)) { if ('title' in o || 'style' in o || 'colors' in o || 'designSystem' in o || 'stylePrompt' in o || 'sawImages' in o) return o; fallback = fallback || o; } } catch { /* следующий вариант */ }
   }
   if (fallback) return fallback;
   throw new Error(tries.length ? 'Не удалось разобрать ответ нейросети' : 'Нейросеть вернула ответ не в том формате');
@@ -1447,30 +1479,60 @@ function matchType(name) {
   if (t) return t.id;
   const nt = { id: 't' + uid(), name: name.trim().slice(0, 40) }; S.types.push(nt); saveTypes(); return nt.id;
 }
+function normColors(x) {
+  if (!Array.isArray(x)) return [];
+  const seen = new Set(), out = [];
+  for (const c of x) {
+    if (!c || !isHex(c.hex)) continue; let hex = String(c.hex).trim().toUpperCase();
+    if (hex.length === 4) hex = '#' + [...hex.slice(1)].map(ch => ch + ch).join(''); hex = hex.slice(0, 7);
+    if (seen.has(hex)) continue; seen.add(hex);
+    const rr = low(c.role); const role = COLOR_ROLES.includes(rr) ? rr : rr === 'primary' ? 'secondary' : ['border', 'decorative'].includes(rr) ? 'muted' : '';
+    const p = Math.round(clamp(+(c.share ?? c.p) || 0, 0, 100));
+    out.push(p ? { hex, role, p } : { hex, role });
+  }
+  return out.slice(0, 7);
+}
 function applyAI(r, d) {
-  r.tags = { style: strArr(d.style, 8), direction: strArr(d.direction, 6), keywords: strArr(d.keywords, 12) };
+  r.tags = { style: strArr(d.style || d.styleTags, 8), direction: [], keywords: [] };
   r.description = str(d.description, 500);
   if (r.titleAuto && str(d.title)) r.title = str(d.title, 80);
   if (!r.typeLocked && str(d.type)) r.type = matchType(str(d.type, 60));
-  r.fonts = (Array.isArray(d.fonts) ? d.fonts : []).filter(f => f && str(f.name)).slice(0, 6).map(f => ({ name: str(f.name, 60), category: str(f.category, 30), role: str(f.role, 80), confidence: clamp(+f.confidence || 0, 0, 1), alternatives: strArr(f.alternatives, 4) }));
-  r.ds = normDS(d.designSystem || d.design_system);
+  r.fonts = (Array.isArray(d.fonts) ? d.fonts : []).filter(f => f && str(f.name)).slice(0, 3).map(f => ({ name: str(f.name, 60), category: str(f.category, 30), look: str(f.look, 160), role: str(f.role, 120), confidence: clamp(+f.confidence || 0, 0, 1), alternatives: strArr(f.alternatives, 3) }));
+  const cs = normColors(d.colors || d.designSystem?.colors); r.colors = cs.length ? cs : deriveColors({ ...r, ds: null });
+  r.ds = null;
+  const sp = str(d.stylePrompt || d.style_prompt, 2500); if (sp) r.stylePrompt = sp;
 }
-const FIX_PROMPT = 'Your previous reply did not contain the required JSON object. Reply now with ONLY that single JSON object in the exact shape described above (keys: title, type, description, style, direction, keywords, fonts, designSystem). No explanations, no markdown, no text before or after it. If you cannot see the images, still return the JSON based on what you could read from the link and say so in "description".';
+function buildStylePromptOnly(r, manifest) {
+  const known = { title: r.title, type: typeName(r.type), description: r.description, styleTags: r.tags.style,
+    fonts: r.fonts.map(f => [f.name, f.look].filter(Boolean).join(' — ')), colors: (r.colors || []).map(c => [c.hex, c.role, c.p ? c.p + '%' : ''].filter(Boolean).join(' ')) };
+  return `You are a senior art director. The attached images show one design reference${isPageLink(r) ? ` (a render of ${r.url})` : ''}:
+${manifest.map(m => '  - ' + m).join('\n')}
+Earlier analysis of this reference, for context (the images are the source of truth): ${JSON.stringify(known)}
+
+Write a style prompt for this reference. Return ONLY one JSON object: {"stylePrompt": "..."}. No markdown, no comments.
+
+${styleRules()}`;
+}
+const FIX_PROMPT_STYLE = 'Your previous reply did not contain the required JSON object. Reply now with ONLY {"stylePrompt": "..."} following the rules above. No other text.';
+const FIX_PROMPT = 'Your previous reply did not contain the required JSON object. Reply now with ONLY that single JSON object in the exact shape described above (keys: sawImages, title, type, description, style, colors, fonts, stylePrompt). No explanations, no markdown, no text before or after it. If you cannot see the images, set "sawImages": false.';
 function rawErr(msg, raw) { const e = new Error(msg); e.raw = raw; return e; }
 async function analyze(id) {
   const r = refById(id); if (!r) return;
-  r.ai = { status: 'running', rateTries: r.ai?.rateTries || 0 }; updateCard(r); if (S.openId === id) renderDetail();
+  const mode = jobMode.get(id) || 'full'; jobMode.delete(id); const K = jobKey(mode); const P = mode === 'prompt';
+  if (P && !(r.sp && r.sp.status === 'pending')) r.sp = {};
+  r[K] = { status: 'running', rateTries: r[K]?.rateTries || 0 }; updateCard(r); if (S.openId === id) renderDetail();
   try {
     const { parts, manifest } = await aiImages(r);
-    const prompt = buildPrompt(r, manifest);
-    let res = await callAI(parts, prompt, r), data;
+    const prompt = P ? buildStylePromptOnly(r, manifest) : buildPrompt(r, manifest);
+    const callR = P ? null : r;
+    let res = await callAI(parts, prompt, callR), data;
     const limited = t => { if (RATE_RE.test(String(t || '')) && String(t).length < 3000) { const e = new Error('Провайдер модели перегружен или исчерпан лимит запросов'); e.rate = rateWait(t); e.raw = String(t); throw e; } };
     try { data = parseJSON(res.text); }
     catch {
       limited(res.text);
       /* Модель ответила текстом: один раз просим вернуть только JSON. */
       const first = String(res.text || '');
-      const res2 = await callAI(parts, prompt, r, [{ role: 'assistant', content: first.trim() ? first.slice(0, 12000) : '(empty reply)' }, { role: 'user', content: FIX_PROMPT }]);
+      const res2 = await callAI(parts, prompt, callR, [{ role: 'assistant', content: first.trim() ? first.slice(0, 12000) : '(empty reply)' }, { role: 'user', content: P ? FIX_PROMPT_STYLE : FIX_PROMPT }]);
       try { data = parseJSON(res2.text); res = { ...res2, fetched: res.fetched || res2.fetched }; }
       catch {
         limited(res2.text);
@@ -1478,33 +1540,41 @@ async function analyze(id) {
         throw rawErr(!first.trim() && !String(res2.text || '').trim() ? 'Модель вернула пустой ответ' : 'Модель ответила текстом вместо данных, даже после повторной просьбы. Нажмите «Ответ модели», чтобы увидеть причину.', both);
       }
     }
+    if (P) {
+      const sp = str(data.stylePrompt || data.style_prompt || data.prompt, 2500);
+      if (!sp) throw rawErr('В ответе нет промпта стиля', JSON.stringify(data).slice(0, 4000));
+      r.stylePrompt = sp; r.sp = { status: 'done', at: Date.now(), model: currentModel() };
+    } else {
+    if (data.sawImages === false && !isPageLink(r)) throw rawErr('Модель не видит изображения, поэтому скриншот не разобран. Для референсов без ссылки нужна модель со зрением: Claude, OpenAI или модель Hermes, которая принимает картинки.', JSON.stringify(data, null, 2).slice(0, 6000));
     applyAI(r, data);
     r.ai = { status: 'done', provider: S.settings.provider, providerName: S.settings.provider === 'custom' ? (S.settings.customName || 'Своя модель') : undefined, model: currentModel(), at: Date.now(), source: isPageLink(r) ? 'link' : 'image', fetched: !!res.fetched };
+    }
   } catch (e) {
-    const tries = (r.ai?.rateTries || 0) + 1;
+    const tries = (r[K]?.rateTries || 0) + 1;
     if (e.rate && tries <= 6) {
       /* Временная перегрузка: ждём и повторяем сами, без лишних запросов. */
       S.pauseUntil = Math.max(S.pauseUntil || 0, Date.now() + e.rate);
-      r.ai = { status: 'pending', rateTries: tries, waitUntil: S.pauseUntil, raw: e.raw };
-      S.queue.unshift(id); await saveRef(r); updateCard(r); if (S.openId === id) renderDetail();
+      r[K] = { status: 'pending', rateTries: tries, waitUntil: S.pauseUntil, raw: e.raw };
+      jobMode.set(id, mode); S.queue.unshift(id); await saveRef(r); updateCard(r); if (S.openId === id) renderDetail();
       if (tries === 1) toast(`Провайдер модели перегружен. Анализ продолжится сам в ${new Date(S.pauseUntil).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`);
       return;
     }
-    r.ai = { status: 'error', error: e.rate ? 'Провайдер модели перегружен: 6 попыток подряд не прошли. Попробуйте позже или подключите в Hermes резервного провайдера.' : String(e.message || e).slice(0, 300) };
-    if (e.raw) r.ai.raw = String(e.raw).slice(0, 20000);
-    toast('Анализ не удался: ' + r.ai.error, 'err');
+    r[K] = { status: 'error', error: e.rate ? 'Провайдер модели перегружен: 6 попыток подряд не прошли. Попробуйте позже или подключите в Hermes резервного провайдера.' : String(e.message || e).slice(0, 300) };
+    if (e.raw) r[K].raw = String(e.raw).slice(0, 20000);
+    toast((P ? 'Промпт стиля не создан: ' : 'Анализ не удался: ') + r[K].error, 'err');
   }
   if (!refById(id)) return;
   await saveRef(r); updateCard(r); renderSide();
   if (S.openId === id) renderDetail();
   if (S.view === 'library' && S.group) renderContent();
 }
-function showRaw(r) {
+function showRaw(r, mode = 'full') {
+  const job = r[jobKey(mode)] || {};
   const m = modal({ title: 'Ответ модели', wide: true,
-    body: `<p class="hint" style="margin-top:4px">Так модель ответила на запрос анализа. Частые причины: модель не видит изображения (текстовая), агент выполнил задачу по-своему и описал результат словами, ответ оборвался по лимиту длины.</p><pre class="log" style="max-height:52vh;white-space:pre-wrap;word-break:break-word">${esc(r.ai.raw || '')}</pre>`,
-    foot: `<button class="btn grow" id="raw-copy">Скопировать</button><button class="btn" data-close>Закрыть</button><button class="btn primary" id="raw-retry">${I.spark}Повторить анализ</button>` });
-  m.q('#raw-copy').onclick = () => copyText(r.ai.raw || '', 'Ответ скопирован');
-  m.q('#raw-retry').onclick = () => { m.close(); enqueue(r.id); };
+    body: `<p class="hint" style="margin-top:4px">Так модель ответила на запрос. Частые причины: модель не видит изображения (текстовая), агент выполнил задачу по-своему и описал результат словами, ответ оборвался по лимиту длины.</p><pre class="log" style="max-height:52vh;white-space:pre-wrap;word-break:break-word">${esc(job.raw || '')}</pre>`,
+    foot: `<button class="btn grow" id="raw-copy">Скопировать</button><button class="btn" data-close>Закрыть</button><button class="btn primary" id="raw-retry">${I.spark}Повторить</button>` });
+  m.q('#raw-copy').onclick = () => copyText(job.raw || '', 'Ответ скопирован');
+  m.q('#raw-retry').onclick = () => { m.close(); enqueue(r.id, mode); };
 }
 async function testProvider(out) {
   const s = S.settings; out.className = 'result'; out.textContent = 'Проверяю…';
@@ -1535,7 +1605,7 @@ async function gitSha(bytes) {
 }
 function publicHTML() { return SOURCE_HTML.replace(/<html\b/i, '<html data-mode="public"'); }
 function publicRef(r, t, f) {
-  const o = { id: r.id, createdAt: r.createdAt, title: r.title, type: r.type, url: r.url, w: r.w, h: r.h, tw: r.tw, th: r.th, palette: r.palette, tags: r.tags, fonts: r.fonts, ds: r.ds, description: r.description, boards: r.boards };
+  const o = { id: r.id, createdAt: r.createdAt, title: r.title, type: r.type, url: r.url, w: r.w, h: r.h, tw: r.tw, th: r.th, palette: r.palette, colors: r.colors, tags: { style: r.tags.style }, fonts: r.fonts, description: r.description, stylePrompt: r.stylePrompt || '', boards: r.boards };
   if (t !== undefined) o.t = t; if (f) o.f = f; if (!r.hasImg && r.remote) o.remote = r.remote;
   return o;
 }
@@ -1670,6 +1740,7 @@ function openSettings(tab = 'ai') {
     $$('.tabs button', m.el).forEach(b => b.classList.toggle('on', b.dataset.t === t));
     const body = m.q('#st-body');
     if (t === 'ai') {
+      const noPrompt = S.refs.filter(r => r.ai?.status === 'done' && !r.stylePrompt && r.sp?.status !== 'pending' && r.sp?.status !== 'running').length;
       const p = s.provider; const untagged = S.refs.filter(r => r.ai?.status !== 'done' && r.ai?.status !== 'running' && r.ai?.status !== 'pending' && r.shot !== 'pending').length;
       body.innerHTML = `<div class="prov">
         <label><input type="radio" name="prov" value="claude" ${p === 'claude' ? 'checked' : ''}><b>Claude</b><small>Anthropic, по ключу API</small></label>
@@ -1706,11 +1777,14 @@ function openSettings(tab = 'ai') {
       <div class="box"><label class="f" style="margin-top:0"><span>Язык тегов и описаний</span><select class="inp" data-s="lang"><option value="ru" ${s.lang === 'ru' ? 'selected' : ''}>Русский</option><option value="en" ${s.lang === 'en' ? 'selected' : ''}>English</option></select></label>
       <label class="chk"><input type="checkbox" data-s="autoAnalyze" ${s.autoAnalyze ? 'checked' : ''}>Анализировать автоматически при добавлении</label>
       <div class="hint">Правило анализа: если у референса есть ссылка, анализ идёт в первую очередь по ссылке, а обложкой становится скриншот первого экрана страницы. Если ссылки нет, анализ и обложка — по вашему скриншоту.</div>
-      ${untagged ? `<div class="row"><button class="btn sm" id="st-all">${I.spark}Разметить без тегов: ${untagged}</button></div>` : ''}</div>
+      <label class="f"><span>Язык промпта стиля</span><select class="inp" data-s="promptLang"><option value="en" ${s.promptLang !== 'ru' ? 'selected' : ''}>English — лучше для Midjourney, Flux, Stable Diffusion</option><option value="ru" ${s.promptLang === 'ru' ? 'selected' : ''}>Русский</option></select></label>
+      ${untagged ? `<div class="row"><button class="btn sm" id="st-all">${I.spark}Разметить без тегов: ${untagged}</button></div>` : ''}
+      ${noPrompt ? `<div class="row"><button class="btn sm" id="st-prompts">${I.spark}Создать промпты стиля: ${noPrompt}</button></div><div class="hint">Для уже разобранных референсов: дописывает только промпт, теги и дизайн-система не меняются.</div>` : ''}</div>
       <p class="hint">Ключи хранятся только в этом браузере и никогда не публикуются.</p>`;
       $$('input[name=prov]', body).forEach(i => i.onchange = () => { s.provider = i.value; saveSettings(); draw('ai'); });
       m.q('#st-test').onclick = () => testProvider(m.q('#st-test-res'));
       m.q('#st-proxy')?.addEventListener('click', () => { if (!S.settings.customBase) return toast('Сначала укажите адрес API', 'err'); copyText(proxyCode(), 'Код прокси скопирован'); });
+      m.q('#st-prompts')?.addEventListener('click', () => { if (!providerReady()) return toast('Сначала подключите нейросеть', 'err'); const list = S.refs.filter(r => r.ai?.status === 'done' && !r.stylePrompt); list.forEach(r => enqueue(r.id, 'prompt')); m.close(); toast(`Создаю промпты стиля: ${list.length}`); });
       m.q('#st-all')?.addEventListener('click', () => { if (!providerReady()) return toast('Сначала укажите ключ', 'err'); S.refs.filter(r => r.ai?.status !== 'done' && r.shot !== 'pending').forEach(r => enqueue(r.id)); m.close(); toast('Разметка запущена'); });
     }
     if (t === 'publish') {
@@ -1745,7 +1819,7 @@ function openSettings(tab = 'ai') {
     if (gk) s.gh[gk] = e.target.value.trim();
     saveSettings();
   });
-  m.el.addEventListener('change', e => { if (['lang', 'autoAnalyze', 'webFetch', 'customFormat'].includes(e.target.dataset.s)) { s[e.target.dataset.s] = e.target.type === 'checkbox' ? e.target.checked : e.target.value; saveSettings(); } });
+  m.el.addEventListener('change', e => { if (['lang', 'promptLang', 'autoAnalyze', 'webFetch', 'customFormat'].includes(e.target.dataset.s)) { s[e.target.dataset.s] = e.target.type === 'checkbox' ? e.target.checked : e.target.value; saveSettings(); } });
   draw(tab);
 }
 async function exportBackup() {
@@ -1800,6 +1874,9 @@ const ACTIONS = {
   'd-next': () => stepDetail(1),
   'd-boards': a => openBoardsPop(a, S.openId),
   'd-analyze': () => enqueue(S.openId),
+  'd-sp-gen': () => enqueue(S.openId, 'prompt'),
+  'd-sp-copy': a => { const r = refById(a.dataset.id || S.openId); if (r?.stylePrompt) copyText(r.stylePrompt, 'Промпт стиля скопирован'); },
+  'd-sp-raw': () => { const r = refById(S.openId); if (r?.sp?.raw) showRaw(r, 'prompt'); },
   'd-tag': a => { const k = a.dataset.k, v = a.dataset.v; closeDetail(); if (S.view === 'boards') S.view = 'library'; if (!isActive(k, v)) S.filters.push({ k, v }); render(); },
   'd-tagdel': async (a, e) => { e.stopPropagation(); const r = refById(S.openId); r.tags[a.dataset.k] = r.tags[a.dataset.k].filter(t => t !== a.dataset.v); await saveRef(r); renderDetail(); updateCard(r); renderSide(); },
   'd-fontdel': async a => { const r = refById(S.openId); r.fonts.splice(+a.dataset.i, 1); await saveRef(r); renderDetail(); renderSide(); },
@@ -1807,7 +1884,7 @@ const ACTIONS = {
   'd-css': () => { const r = refById(S.openId); copyText(dsToCSS(r.ds, r.title), 'CSS-переменные скопированы'); },
   'd-json': () => { const r = refById(S.openId); copyText(JSON.stringify({ title: r.title, fonts: r.fonts, palette: r.palette, designSystem: r.ds }, null, 2), 'JSON скопирован'); },
   'd-replace': () => { const p = $('#replacepick'); const id = S.openId; p.onchange = async () => { const f = p.files[0]; p.value = ''; const r = refById(id); if (f && r) { try { const link = isPageLink(r); await attachImage(r, f); if (!link) toast('Изображение заменено'); } catch (e) { toast(e.message, 'err'); } } }; p.click(); },
-  'd-raw': () => { const r = refById(S.openId); if (r?.ai?.raw) showRaw(r); },
+  'd-raw': () => { const r = refById(S.openId); if (r?.ai?.raw) showRaw(r, 'full'); },
   'd-reshoot': () => { const r = refById(S.openId); if (r && isPageLink(r)) shootLink(r); },
   'd-usershot-del': async () => { const r = refById(S.openId); await DB.del('files', r.id + ':user'); r.userShot = false; await saveRef(r); renderDetail(); },
   'd-download': async () => { const r = refById(S.openId); const b = await getFile(r.id, 'orig'); if (b) download(b, cleanName(r.title) + '.' + extOf(b.type)); },
@@ -1921,6 +1998,7 @@ async function boot() {
   for (const r of S.refs) {
     if (r.shot === 'pending') { addUrlResume(r); continue; }
     if (r.ai?.status === 'pending' || r.ai?.status === 'running') { r.ai = { status: 'none' }; if (providerReady()) enqueue(r.id); else updateCard(r); }
+    else if (r.sp?.status === 'pending' || r.sp?.status === 'running') { r.sp = {}; if (providerReady()) enqueue(r.id, 'prompt'); }
   }
 }
 function addUrlResume(r) { shootLink(r); }
