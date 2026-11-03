@@ -347,10 +347,15 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;back
 <input type="file" id="filepick" accept="image/*" multiple="" hidden="">
 <input type="file" id="replacepick" accept="image/*" hidden="">
 <input type="file" id="importpick" accept=".json,application/json" hidden="">
+
 <script>
 'use strict';
 /* Refbase — библиотека дизайн-референсов. Один файл: локальная база (IndexedDB) + публикация на GitHub Pages.
    Опубликованная копия — этот же файл с атрибутом data-mode="public" на <html>, работает только на просмотр. */
+/* Встроенное обновление данных (если есть) убирается из страницы до того, как она копируется для публикации. */
+const SEED_EL = document.getElementById('rb-seed');
+const SEED_TEXT = SEED_EL ? SEED_EL.textContent : '';
+if (SEED_EL) SEED_EL.remove();
 const SOURCE_HTML = '<!doctype html>\n' + document.documentElement.outerHTML;
 const PUB = document.documentElement.getAttribute('data-mode') === 'public';
 
@@ -608,7 +613,7 @@ const io = new IntersectionObserver(es => {
     io.unobserve(e.target); const r = refById(e.target.dataset.img); if (!r) continue;
     thumbSrc(r).then(u => {
       if (!u) { e.target.closest('.thumb')?.insertAdjacentHTML('beforeend', '<div class="ph">Нет изображения</div>'); return; }
-      e.target.onload = () => e.target.classList.add('ld'); e.target.onerror = () => { e.target.classList.add('noimg'); e.target.closest('.thumb')?.insertAdjacentHTML('beforeend', '<div class="ph">Превью не загрузилось — откройте карточку и вставьте скриншот</div>'); }; e.target.src = u;
+      e.target.onload = () => e.target.classList.add('ld'); e.target.onerror = () => { e.target.classList.add('noimg'); e.target.closest('.thumb')?.insertAdjacentHTML('beforeend', '<div class="ph">Превью не загрузилось. Откройте карточку и нажмите «Обновить скриншот» или добавьте свой</div>'); }; e.target.src = u;
     });
   }
 }, { rootMargin: '700px' });
@@ -1101,19 +1106,48 @@ const shotURL = (u, kind = 'cover', bust) => `https://s.wordpress.com/mshots/v1/
 function loadImg(src, cors) {
   return new Promise((res, rej) => { const i = new Image(); if (cors) i.crossOrigin = 'anonymous'; i.onload = () => res(i); i.onerror = () => rej(new Error('load')); i.src = src; });
 }
-/* Скриншот страницы через бесплатный сервис mShots: первый ответ — заглушка, потом готовый кадр. */
-async function captureShot(u, kind = 'cover') {
-  for (let t = 0; t < 10; t++) {
-    const src = shotURL(u, kind, t ? Date.now() : 0);
-    try {
-      const img = await loadImg(src, true);
-      if (img.naturalWidth >= 1000) { const b = await toBlob(canvasFrom(img, 0, 0, img.naturalWidth, img.naturalHeight, img.naturalWidth, img.naturalHeight), 'image/png'); if (b) return { blob: b }; }
-    } catch {
-      try { const img = await loadImg(src, false); if (img.naturalWidth >= 1000) return { remote: src }; } catch { /* ещё не готово */ }
-    }
-    await sleep(3500);
+/* Скриншоты страниц делают бесплатные сервисы. У каждого бывают лимиты и сбои (mShots отвечает 429, у Microlink дневной лимит),
+   поэтому пробуем их по очереди и берём первый настоящий кадр. */
+async function fetchImg(url, minW = 800, ms = 60000) {
+  const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), ms);
+  try {
+    const r = await fetch(url, { signal: ctl.signal, cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const b = await r.blob(); if (!b.type.startsWith('image/') || b.size < 8000) throw new Error('not an image');
+    const bm = await loadBitmap(b); const { w } = dimsOf(bm); if (bm.close) bm.close();
+    if (w < minW) throw new Error('too small'); return b;
+  } finally { clearTimeout(t); }
+}
+async function mshotBlob(u, kind) {
+  for (let t = 0; t < 4; t++) {
+    try { const img = await loadImg(shotURL(u, kind, t ? Date.now() : 0), true); if (img.naturalWidth >= 1000) { const b = await toBlob(canvasFrom(img, 0, 0, img.naturalWidth, img.naturalHeight, img.naturalWidth, img.naturalHeight), 'image/png'); if (b) return b; } } catch { /* заглушка или лимит */ }
+    await sleep(4000);
   }
-  return { remote: shotURL(u, kind) };
+  throw new Error('mShots недоступен');
+}
+const SHOT_PROVIDERS = [
+  { name: 'Microlink', cover: async u => {
+    const r = await fetch(`https://api.microlink.io/?url=${encodeURIComponent(u)}&screenshot=true&meta=false&viewport.width=1440&viewport.height=900&viewport.deviceScaleFactor=1&screenshot.type=jpeg&waitForTimeout=3000`, { cache: 'no-store' });
+    const j = await r.json().catch(() => ({})); const s = j?.data?.screenshot?.url; if (!s) throw new Error(j?.message || 'нет скриншота');
+    return fetchImg(s); } },
+  { name: 'thum.io', cover: u => fetchImg(`https://image.thum.io/get/width/1440/crop/900/noanimate/${u}`), deep: u => fetchImg(`https://image.thum.io/get/width/1440/crop/3600/noanimate/${u}`) },
+  { name: '11ty', cover: u => fetchImg(`https://v1.screenshot.11ty.dev/${encodeURIComponent(u)}/opengraph/`) },
+  { name: 'mShots', cover: u => mshotBlob(u, 'cover'), deep: u => mshotBlob(u, 'deep') },
+];
+/* Обложка — первый экран: слишком высокий кадр обрезаем сверху до пропорции 16:10. */
+async function cropFirstScreen(blob) {
+  const bm = await loadBitmap(blob); const { w, h } = dimsOf(bm);
+  if (h / w <= 0.7) { if (bm.close) bm.close(); return blob; }
+  const c = canvasFrom(bm, 0, 0, w, Math.round(w * 0.625), w, Math.round(w * 0.625)); if (bm.close) bm.close();
+  return (await toBlob(c, 'image/jpeg', 0.92)) || blob;
+}
+async function captureShot(u, kind = 'cover') {
+  for (const p of SHOT_PROVIDERS) {
+    const fn = p[kind]; if (!fn) continue;
+    try { let b = await fn(u); if (kind === 'cover') b = await cropFirstScreen(b); return { blob: b, provider: p.name }; }
+    catch { /* следующий сервис */ }
+  }
+  return { remote: kind === 'cover' ? shotURL(u, kind) : null };
 }
 const normURL = v => { v = String(v || '').trim(); if (v && !/^https?:\/\//i.test(v)) v = 'https://' + v; return v; };
 function refreshDetail(r) { if (S.openId === r.id && $('#detail')) { $('#detail').dataset.id = ''; renderDetail(); } }
@@ -1130,13 +1164,29 @@ async function clearCover(r) {
 /* Правило: у референса со ссылкой обложка — первый экран страницы; длинный кадр идёт в анализ. */
 async function shootLink(r, analyze = true) {
   const u = r.url; r.shot = 'pending'; r.cover = 'link'; await saveRef(r); updateCard(r); refreshDetail(r);
-  const [cover, deep] = await Promise.all([captureShot(u, 'cover'), captureShot(u, 'deep')]);
+  const cover = await captureShot(u, 'cover');
+  const deep = await captureShot(u, 'deep');
   if (!refById(r.id) || r.url !== u) return;
   delete r.shot;
-  if (cover.blob) await setCover(r, cover.blob); else { await clearCover(r); r.remote = cover.remote; }
-  if (deep.blob) { await putFile(r.id, 'deep', deep.blob); delete r.deepRemote; } else { await DB.del('files', r.id + ':deep'); r.deepRemote = deep.remote; }
+  if (cover.blob) { await setCover(r, cover.blob); r.coverFixedAt = Date.now(); }
+  else if (!r.hasImg) r.remote = cover.remote;
+  else toast('Сервисы скриншотов сейчас недоступны — оставил прежнюю обложку', 'err');
+  if (deep.blob) { await putFile(r.id, 'deep', deep.blob); delete r.deepRemote; } else { await DB.del('files', r.id + ':deep'); delete r.deepRemote; }
   await saveRef(r); updateCard(r); refreshDetail(r);
   if (analyze) maybeAnalyze(r);
+}
+/* Обложки по ссылкам, которые не загрузились (сервис скриншотов был недоступен), чиним сами при открытии — без повторного анализа. */
+async function repairCovers() {
+  const list = S.refs.filter(r => isPageLink(r) && !r.hasImg && r.shot !== 'pending' && Date.now() - (r.coverTriedAt || 0) > 6 * 3600e3).slice(0, 10);
+  let fixed = 0;
+  for (const r of list) {
+    r.coverTriedAt = Date.now();
+    const c = await captureShot(r.url, 'cover');
+    if (!refById(r.id)) continue;
+    if (c.blob) { await setCover(r, c.blob); r.coverFixedAt = Date.now(); fixed++; }
+    await saveRef(r); updateCard(r); refreshDetail(r);
+  }
+  if (fixed) toast(`Обложки по ссылкам восстановлены: ${fixed}`);
 }
 async function addUserShot(r, blob) {
   await putFile(r.id, 'user', blob); r.userShot = true; await saveRef(r); refreshDetail(r);
@@ -1838,13 +1888,54 @@ async function importBackup(file) {
   if (d.format !== 'refbase-backup') return toast('Это не резервная копия Refbase', 'err');
   const mode = await choiceDlg('Восстановить из копии', `В копии ${nRefs(d.refs?.length || 0)} и ${d.boards?.length || 0} ${plural(d.boards?.length || 0, 'доска', 'доски', 'досок')}. Заменить текущую базу или добавить к ней?`, [{ k: 'merge', label: 'Добавить к текущей' }, { k: 'replace', label: 'Заменить', cls: 'primary' }]);
   if (!mode) return;
+  await applyBackup(d, mode);
+  toast('Восстановлено: ' + nRefs(d.refs?.length || 0));
+}
+/* mode: replace — заменить базу; merge — добавить и перезаписать совпадающие;
+   update — только содержимое анализа у совпадающих референсов (доски, заметки и картинки остаются ваши), недостающие добавляются целиком. */
+const CONTENT_FIELDS = ['title', 'titleAuto', 'type', 'typeLocked', 'description', 'tags', 'fonts', 'colors', 'stylePrompt', 'sp', 'ds', 'ai'];
+async function applyBackup(d, mode) {
   if (mode === 'replace') { for (const st of ['refs', 'boards', 'files']) await DB.clear(st); S.refs = []; S.boards = []; S.types = []; thumbCache.clear(); }
   for (const t of d.types || []) if (!typeById(t.id)) S.types.push(t);
   await saveTypes();
-  for (const b of d.boards || []) { if (!boardById(b.id)) S.boards.push(b); await DB.put('boards', b); }
-  for (const [k, v] of Object.entries(d.files || {})) await DB.put('files', dataURLToBlob(v), k);
-  for (const r of d.refs || []) { normalizeRef(r); if (r.ai?.status === 'running' || r.ai?.status === 'pending') r.ai = { status: 'none' }; S.refs = S.refs.filter(x => x.id !== r.id); S.refs.push(r); dropThumb(r.id); await DB.put('refs', r); }
-  S.refs.sort((a, b) => b.createdAt - a.createdAt); markChanged(); render(); toast('Восстановлено: ' + nRefs(d.refs?.length || 0));
+  for (const b of d.boards || []) { if (!boardById(b.id)) { S.boards.push(b); await DB.put('boards', b); } }
+  const files = d.files || {};
+  for (const src of d.refs || []) {
+    const cur = mode === 'update' ? refById(src.id) : null;
+    if (cur) {
+      for (const k of CONTENT_FIELDS) if (k in src) cur[k] = structuredClone(src[k]);
+      /* исправленная обложка из обновления: только если своей нет или она старее */
+      if (src.hasImg && files[src.id + ':thumb'] && (!cur.hasImg || (src.coverFixedAt || 0) > (cur.coverFixedAt || 0))) {
+        for (const k of ['orig', 'web', 'thumb']) if (files[src.id + ':' + k]) await DB.put('files', dataURLToBlob(files[src.id + ':' + k]), src.id + ':' + k);
+        for (const k of ['w', 'h', 'tw', 'th', 'palette', 'hasImg', 'webType', 'cover', 'coverFixedAt']) if (k in src) cur[k] = structuredClone(src[k]);
+        delete cur.remote; delete cur.deepRemote; dropThumb(cur.id);
+      }
+      normalizeRef(cur); cur.updatedAt = Date.now(); await DB.put('refs', cur); continue;
+    }
+    for (const [k, v] of Object.entries(files)) if (k.startsWith(src.id + ':')) await DB.put('files', dataURLToBlob(v), k);
+    const r = normalizeRef(structuredClone(src)); if (r.ai?.status === 'running' || r.ai?.status === 'pending') r.ai = { status: 'none' };
+    S.refs = S.refs.filter(x => x.id !== r.id); S.refs.push(r); dropThumb(r.id); await DB.put('refs', r);
+  }
+  S.refs.sort((a, b) => b.createdAt - a.createdAt); markChanged(); render();
+  if (S.openId) { const ov = $('#detail'); if (ov) ov.dataset.id = ''; renderDetail(); }
+}
+/* Если в файл встроено обновление данных, один раз предлагаем его применить. */
+async function offerSeed() {
+  if (!SEED_TEXT) return;
+  let d; try { d = JSON.parse(SEED_TEXT); } catch { return; }
+  if (d.format !== 'refbase-backup' || !d.refs?.length) return;
+  const id = String(d.exportedAt || 'seed');
+  if ((await DB.get('meta', 'seedApplied')) === id) return;
+  const known = d.refs.filter(r => refById(r.id)).length, fresh = d.refs.length - known;
+  const covers = d.refs.filter(r => r.coverFixedAt && refById(r.id) && !refById(r.id).hasImg).length;
+  const text = `В этой версии файла есть переписанные данные для ${nRefs(d.refs.length)}: название, описание, палитра, шрифты, теги стиля и промпт для нейросети.` + (covers ? ` Также будут исправлены обложки по ссылкам: ${covers}.` : '')
+    + (known ? ` ${known} ${plural(known, 'референс уже есть', 'референса уже есть', 'референсов уже есть')} в вашей базе — у них обновятся только эти поля, доски и картинки останутся прежними.` : '')
+    + (fresh ? ` ${nRefs(fresh)} ${plural(fresh, 'добавится', 'добавятся', 'добавятся')} целиком.` : '')
+    + ' Остальные референсы не изменятся.';
+  const k = await choiceDlg('Обновить референсы?', text, [{ k: 'skip', label: 'Не применять' }, { k: 'apply', label: 'Обновить', cls: 'primary' }]);
+  if (!k) return;
+  if (k === 'apply') { await applyBackup(d, 'update'); toast('Обновлено: ' + nRefs(d.refs.length)); }
+  await DB.put('meta', id, 'seedApplied');
 }
 
 /* ---------- события ---------- */
@@ -1995,6 +2086,7 @@ async function boot() {
   S.lastChange = lastChange || 0;
   navigator.storage?.persist?.().catch(() => {});
   renderTop(); render(); bindGlobal();
+  offerSeed().catch(e => toast('Не удалось применить обновление данных: ' + e.message, 'err')).finally(() => repairCovers().catch(() => {}));
   for (const r of S.refs) {
     if (r.shot === 'pending') { addUrlResume(r); continue; }
     if (r.ai?.status === 'pending' || r.ai?.status === 'running') { r.ai = { status: 'none' }; if (providerReady()) enqueue(r.id); else updateCard(r); }
